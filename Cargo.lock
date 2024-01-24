@@ -94,17 +94,10 @@ name = "axum_thiserror"
 version = "0.1.0"
 dependencies = [
  "axum",
- "axum_thiserror_macro",
- "thiserror",
-]
-
-[[package]]
-name = "axum_thiserror_macro"
-version = "0.1.0"
-dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+ "thiserror",
 ]
 
 [[package]]

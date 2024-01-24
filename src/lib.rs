@@ -1,25 +1,119 @@
-pub use axum_thiserror_macro::ErrorStatus;
+use proc_macro2::{Ident, TokenStream};
+use quote::{quote, quote_spanned};
+use syn::{
+    parse_macro_input, punctuated::Punctuated, spanned::Spanned, token::Comma, Data, DeriveInput,
+    Expr, LitInt, Meta, Path, Variant,
+};
 
-#[cfg(test)]
-mod test {
-    use super::*;
-    use axum::{
-        http::StatusCode,
-        response::{IntoResponse, Response},
-    };
-    use thiserror::Error;
+///! # axum_thiserror
+///! `axum_thiserror` is a library that offers a procedural macro to allow `thiserror` error types to be used as `axum` responses.
+///! ## Usage
+///! Add the library to your current project using Cargo:
+///! ```bash
+///! cargo add axum_thiserror
+///! ```
+///! Then you can create a basic `thiserror` error:
+///! ```rust
+///! #[derive(Error, Debug)]
+///! pub enum UserCreateError {
+///!   #[error("User {0} already exists")]
+///!   UserAlreadyExists(String),
+///! }
+///! ```
+///! Now you can use `axum_thiserror` to implement `IntoResponse` on your error:
+///! ```rust
+///! #[derive(Error, Debug, ErrorStatus)]
+///! pub enum UserCreateError {
+///!   #[error("User {0} already exists")]
+///!   #[status(StatusCode::CONFLICT)]
+///!   UserAlreadyExists(String),
+///! }
+///! ```
+///! ## License
+///! This project is licensed under the [MIT License](LICENSE).
 
-    #[derive(Error, Debug, ErrorStatus)]
-    pub enum Test {
-        #[error("Hello !")]
-        #[status(StatusCode::ACCEPTED)]
-        Hello,
+/// A derivation that implements the `IntoResponse` trait for a specific attribute.
+#[proc_macro_derive(ErrorStatus, attributes(status))]
+pub fn derive_error_status(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let ast: DeriveInput = parse_macro_input!(input);
+    let enum_ident = ast.ident;
+    let cases: Punctuated<TokenStream, Comma> = match ast.data {
+        Data::Enum(data) => data.variants,
+        _ => panic!(
+            "#[derive(ErrorStatus)] is only available for enums, other types are not supported."
+        ),
     }
+    .iter()
+    .map(impl_enum_variant)
+    .collect();
 
-    #[test]
-    pub fn assert_compiles() {
-        let t = Test::Hello;
-        let response: Response = t.into_response();
-        assert_eq!(response.status(), StatusCode::ACCEPTED)
+    quote! {
+        impl axum::response::IntoResponse for #enum_ident {
+            fn into_response(self) -> axum::response::Response {
+                match self {
+                    #cases
+                }
+            }
+        }
+    }
+    .into()
+}
+
+fn impl_enum_variant(input: &Variant) -> TokenStream {
+    let status_code = find_status_code(input);
+    let case = if input.fields.is_empty() {
+        case_empty_fields(input)
+    } else if input.fields.iter().filter(|f| f.ident.is_none()).count() > 0 {
+        case_unnamed_fields(input)
+    } else {
+        case_named_fields(input)
+    };
+    quote! {
+        Self::#case => (#status_code, format!("{}", self)).into_response()
+    }
+}
+
+fn case_empty_fields(input: &Variant) -> TokenStream {
+    let ident = &input.ident;
+    quote!(#ident)
+}
+
+fn case_unnamed_fields(input: &Variant) -> TokenStream {
+    let ident = &input.ident;
+    quote!(#ident( .. ))
+}
+
+fn case_named_fields(input: &Variant) -> TokenStream {
+    let ident = &input.ident;
+    quote!(#ident { .. })
+}
+
+fn find_status_code(input: &Variant) -> TokenStream {
+    match input
+        .attrs
+        .iter()
+        .find(|attr| attr.path().is_ident("status"))
+    {
+        Some(attr) => match &attr.meta {
+            Meta::List(l) => {
+                if let Ok(number) = l.parse_args::<LitInt>() {
+                    quote! {
+                        axum::http::StatusCode::from_u16(#number as u16).unwrap()
+                    }
+                } else if let Ok(expr) = l.parse_args::<Path>() {
+                    quote! {
+                        #expr
+                    }
+                } else {
+                    quote_spanned!(l.span() => compile_error!("Only #[status(StatusCode)] or #[status(u16)] syntaxe is supported"))
+                }
+            }
+            _ => {
+                quote_spanned! { attr.span() => compile_error!("Only #[status(StatusCode)] or #[status(u16)] syntaxe is supported") }
+            }
+        },
+        None => {
+            quote_spanned! { input.span() => compile_error!("Each enum variant should have a status code provided using the #[status()] attribute") }
+        }
     }
 }
